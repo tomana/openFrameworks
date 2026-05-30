@@ -176,6 +176,13 @@ void ofAppGLFWWindow::setup(const ofGLESWindowSettings & settings) {
         //	ofLogNotice("ofAppGLFWWindow") << "WINDOW MODE IS " << screenMode;
         
         glfwDefaultWindowHints();
+        // chroma local patch: honor OF_FORCE_EGL=1 to force GLFW to create
+        // an EGL context even on X11 (default would be GLX). Needed for
+        // cross-process dma-buf paths where producer + consumer must end
+        // up on matching EGLDisplays. No-op when env var unset.
+        if (const char* eglEnv = std::getenv("OF_FORCE_EGL"); eglEnv && *eglEnv == '1') {
+            glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+        }
         glfwWindowHint(GLFW_RED_BITS, settings.redBits);
         glfwWindowHint(GLFW_GREEN_BITS, settings.greenBits);
         glfwWindowHint(GLFW_BLUE_BITS, settings.blueBits);
@@ -375,10 +382,25 @@ void ofAppGLFWWindow::setup(const ofGLESWindowSettings & settings) {
         if (!inited) {
             glewExperimental = GL_TRUE;
             GLenum err = glewInit();
-            if (GLEW_OK != err) {
-                /* Problem: glewInit failed, something is seriously wrong. */
-                ofLogError("ofAppRunner") << "couldn't init GLEW: " << glewGetErrorString(err);
+            // GLEW probes via GLX. On Wayland (no GLX) and on X11 with an
+            // EGL context (OF_FORCE_EGL=1), GLEW returns errors that we
+            // can safely ignore — `glewExperimental = GL_TRUE` has already
+            // loaded GL function pointers via libGL/libglvnd dispatch. If
+            // we bail here, GLFW input-callback registration further down
+            // is skipped and keyboard/mouse events stop reaching oF.
+            const char* eglEnv = std::getenv("OF_FORCE_EGL");
+            const bool usingEgl = (eglEnv && *eglEnv == '1');
+            if (GLEW_OK != err
+                && !((usingWayland || usingEgl)
+                     && (err == GLEW_ERROR_NO_GLX_DISPLAY || usingEgl))) {
+                ofLogError("ofAppRunner") << "couldn't init GLEW: "
+                    << glewGetErrorString(err) << " (code " << (unsigned)err << ")";
                 return;
+            }
+            if (err != GLEW_OK) {
+                ofLogVerbose("ofAppGLFWWindow") << "GLEW init non-fatal: "
+                    << glewGetErrorString(err) << " (code " << (unsigned)err
+                    << ") — Wayland/EGL path, continuing";
             }
             inited = true;
         }
@@ -1186,6 +1208,14 @@ void ofAppGLFWWindow::setup(const ofGLESWindowSettings & settings) {
         
         unsigned long keycodeToUnicode(ofAppGLFWWindow * window, int scancode, int modifier) {
 #ifdef TARGET_LINUX
+            // On Wayland the X11 display/IC are null — getX11Display()
+            // returns nullptr, getX11XIC() returns nullptr, and calling
+            // XkbGetState/Xutf8LookupString on them segfaults. GLFW's
+            // char_cb already produces unicode under Wayland, so skip
+            // the X11 lookup path entirely.
+            if (window->isUsingWayland()) {
+                return 0;
+            }
             XkbStateRec xkb_state = {};
             XkbGetState(window->getX11Display(), XkbUseCoreKbd, &xkb_state);
             XEvent ev = { 0 };
@@ -1605,6 +1635,21 @@ void ofAppGLFWWindow::setup(const ofGLESWindowSettings & settings) {
                 break;
             default:
                 codepoint = keycodeToUnicode(instance, scancode, mods);
+                if (codepoint == 0 && instance->isUsingWayland()) {
+                    // Wayland fallback: keycodeToUnicode returns 0
+                    // (the X11 lookup path is unavailable). Map ASCII
+                    // letters / digits straight from GLFW's keycode so
+                    // app-side checks like `key == 'f'` work. Shift→
+                    // symbol and IME / non-ASCII text come via char_cb,
+                    // which is GLFW-native on Wayland.
+                    if (keycode >= GLFW_KEY_A && keycode <= GLFW_KEY_Z) {
+                        codepoint = (mods & GLFW_MOD_SHIFT)
+                            ? (uint32_t)keycode
+                            : (uint32_t)(keycode - 'A' + 'a');
+                    } else if (keycode >= GLFW_KEY_0 && keycode <= GLFW_KEY_9) {
+                        codepoint = (uint32_t)keycode;
+                    }
+                }
                 key = codepoint;
                 break;
         }
