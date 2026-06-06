@@ -134,6 +134,17 @@ public:
 
 	bool isLoaded() const;
 
+	/// chroma_rt patch (2026-06-06) — pre-compiled shader binary load.
+	/// Loads a program binary previously obtained via glGetProgramBinary,
+	/// promotes the program to the "loaded" state, and queries uniform
+	/// info as if linkProgram() had been called. Returns true on success.
+	/// Used by MeshRenderer to skip GLSL parse/compile/link for cached
+	/// blend shaders. Driver may reject the blob (stale across driver
+	/// updates) — caller should fall back to source compile on false.
+	bool loadProgramBinary(GLenum binaryFormat,
+	                       const void* binary,
+	                       GLsizei length);
+
 	void begin() const;
 	void end() const;
 

@@ -744,6 +744,78 @@ bool ofShader::linkProgram() {
 }
 
 //--------------------------------------------------------------
+// chroma_rt patch (2026-06-06) — load a pre-linked program binary.
+// Mirrors the post-link housekeeping linkProgram() does (uniform
+// cache population + bLoaded flip) so the program is fully usable
+// without going through the source-compile path. Driver may reject
+// the blob (stale across driver updates); caller should fall back
+// to source compile on false.
+bool ofShader::loadProgramBinary(GLenum binaryFormat,
+                                  const void* binary,
+                                  GLsizei length) {
+    checkAndCreateProgram();
+
+    glProgramBinary(program, binaryFormat, binary, length);
+
+    GLint linked = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+        // Stale or incompatible blob. Don't checkProgramInfoLog here —
+        // a stale-cache miss is expected and the caller will fall back.
+        return false;
+    }
+
+    // Pre-cache active uniforms — same dance as linkProgram() so
+    // setUniform("name", v) resolves through uniformsCache instead
+    // of hitting glGetUniformLocation each call.
+    GLint numUniforms = 0;
+    glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &numUniforms);
+    GLint uniformMaxLength = 0;
+    glGetProgramiv(program, GL_ACTIVE_UNIFORM_MAX_LENGTH, &uniformMaxLength);
+    if (uniformMaxLength > 0) {
+        GLint  count = -1;
+        GLenum type  = 0;
+        GLsizei nameLen;
+        GLint  location;
+        std::vector<GLchar> uniformName(uniformMaxLength);
+        for (GLint i = 0; i < numUniforms; i++) {
+            glGetActiveUniform(program, i, uniformMaxLength,
+                               &nameLen, &count, &type, uniformName.data());
+            std::string name(uniformName.begin(), uniformName.begin() + nameLen);
+            location = glGetUniformLocation(program, name.c_str());
+            if (location == -1) continue;
+            uniformsCache[name] = location;
+            auto arrayPos = name.find('[');
+            if (arrayPos != std::string::npos) {
+                name = name.substr(0, arrayPos);
+                uniformsCache[name] = location;
+            }
+        }
+    }
+#ifndef TARGET_OPENGLES
+    #ifdef GLEW_ARB_uniform_buffer_object
+    if (GLEW_ARB_uniform_buffer_object) {
+        GLint numUniformBlocks = 0;
+        glGetProgramiv(program, GL_ACTIVE_UNIFORM_BLOCKS, &numUniformBlocks);
+        if (uniformMaxLength > 0) {
+            std::vector<GLchar> blockName(uniformMaxLength);
+            GLsizei nameLen;
+            for (GLint i = 0; i < numUniformBlocks; i++) {
+                glGetActiveUniformBlockName(program, i, uniformMaxLength,
+                                            &nameLen, blockName.data());
+                std::string name(blockName.begin(), blockName.begin() + nameLen);
+                uniformBlocksCache[name] = glGetUniformBlockIndex(program, name.c_str());
+            }
+        }
+    }
+    #endif
+#endif
+
+    bLoaded = true;
+    return true;
+}
+
+//--------------------------------------------------------------
 #ifdef TARGET_ANDROID
 void ofShader::unloadGL() {
     for (auto it : shaders) {
