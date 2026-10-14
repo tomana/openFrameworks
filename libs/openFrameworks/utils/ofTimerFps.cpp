@@ -24,8 +24,10 @@ void ofTimerFps::setFps(int fps) {
 }
 
 void ofTimerFps::waitNext() {
-   // Lazy wakeup
-   std::this_thread::sleep_until(wakeTime - 8ms); //4ms
+   // Lazy wakeup: sleep until 1 ms before the frame is due, nap only the last millisecond.
+   // (chroma_rt patch: upstream sleeps until wakeTime - 8ms, so a 60 fps loop naps 5 us at a time for half of
+   // every frame. Linux wakes a sleeping thread within ~0.1 ms, so 1 ms keeps the timing exact.)
+   std::this_thread::sleep_until(wakeTime - 1ms);
 
    // Processor Coffee
    while(steady_clock::now() < (wakeTime)) { // 0.05ms 0.5us // - 0.5us  - 1ns
